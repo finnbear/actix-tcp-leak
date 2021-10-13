@@ -12,3 +12,7 @@ Reproducible TCP connection leak affecting `actix-web`
 7. Disconnect your internet connection (I tested on a laptop with WiFi, and turning off the WiFi was sufficient)
 8. Observe that some or all of the inflight TCP connections are permanently leaked
 9. As an alternative to 6-8, observe that ~1 out of every 100 real-end-user connection to the VPS public IP will leak
+
+## Note
+
+The above is not necessarily limited to Debian 11, that's just what I tested.
