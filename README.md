@@ -1,5 +1,5 @@
 # actix-tcp-leak
-Reproducible TCP connection leak affecting `actix-web`
+Reproducible TCP [connection leak](https://github.com/actix/actix-net/issues/351) affecting `actix-web`
 
 ## Setup
 
