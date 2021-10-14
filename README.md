@@ -4,7 +4,7 @@ Reproducible [TCP connection leak](https://github.com/actix/actix-net/issues/351
 ## Setup
 
 1. Create a VPS with Debian 11 and your SSH public key
-2. Add its IP address ot the Makefile
+2. Add its IP address to the Makefile
 3. Run `make provision`
 4. Run `make ssh` or otherwise connect to the VPS
 5. Run `./tcp-leak` on the VPS
