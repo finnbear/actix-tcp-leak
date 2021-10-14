@@ -1,6 +1,12 @@
 DEBIAN_11 = 192.46.220.91
 .RECIPEPREFIX +=
 
+docker-build:
+    docker build -t tcp-leak .
+
+docker-run:
+    docker run tcp-leak
+
 provision:
     cargo build --release
     scp target/release/tcp-leak root@$(DEBIAN_11):/root/tcp-leak

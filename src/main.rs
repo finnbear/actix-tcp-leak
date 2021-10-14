@@ -18,12 +18,15 @@ async fn main() -> io::Result<()> {
         counter += 1;
         thread::sleep(Duration::from_secs(1));
 
-        leak();
+        // There are many ways to leak connections :)
+        leak_one_close_wait_socket_1();
+        leak_one_close_wait_socket_2();
+        leak_two_established_sockets();
     });
 
     let app = move || {
         App::new().service(web::resource("/").route(web::get().to(|| async {
-            sleep(Duration::from_secs(2)).await;
+            sleep(Duration::from_secs(5)).await;
             HttpResponse::Ok().body("Hello World!")
         })))
     };
@@ -35,13 +38,24 @@ async fn main() -> io::Result<()> {
     config.set_single_cert(cert_chain, keys.remove(0)).unwrap();
 
     HttpServer::new(app)
-        .bind_rustls("0.0.0.0:4443", config)?
+        .keep_alive(1)
+        .bind_rustls("0.0.0.0:1443", config)?
+        .bind("0.0.0.0:1080")?
         .run()
         .await
 }
 
-fn leak() {
-    let stream = TcpStream::connect("127.0.0.1:4443").unwrap();
+fn leak_one_close_wait_socket_1() {
+    let mut stream = TcpStream::connect("127.0.0.1:1080").unwrap();
+
+    stream.write(&b"this is ok"[..]).unwrap();
+    stream.flush().unwrap();
+
+    mem::forget(stream);
+}
+
+fn leak_one_close_wait_socket_2() {
+    let stream = TcpStream::connect("127.0.0.1:1443").unwrap();
 
     let mut builder = SslConnector::builder(SslMethod::tls()).unwrap();
     builder.set_verify(SslVerifyMode::NONE);
@@ -50,6 +64,16 @@ fn leak() {
     let mut stream = connector.connect("localhost", stream).unwrap();
     stream.ssl_write(&b"prepare to die, actix web"[..]).unwrap();
     stream.flush().unwrap();
+
+    // Removing this avoids the leak, but the client cannot be trusted.
+    mem::forget(stream);
+}
+
+/// No idea why this leaks TWO sockets...
+fn leak_two_established_sockets() {
+    let stream = TcpStream::connect("127.0.0.1:1443").unwrap();
+
+    // NOTE: SSL port but no SSL handshake.
 
     // Removing this avoids the leak, but the client cannot be trusted.
     mem::forget(stream);
