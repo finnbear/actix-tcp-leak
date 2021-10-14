@@ -26,18 +26,23 @@ async fn main() -> io::Result<()> {
     thread::spawn(move || loop {
         println!("{}, {:?}", counter, connection_counts());
         counter += 1;
+
         thread::sleep(Duration::from_secs(1));
 
-        // There are many ways to leak connections :)
-        if USE_ACTIX_SERVER {
-            // Note: One of the leaked connections is a client->server (irrelevant) but the other
-            // is server->client. However, due to a lack of TCP keep alive, it is arguably to be expected
-            // that the connections leak here.
-            leak_one_close_wait_socket_or_two_established_sockets_if_actix_server();
-        } else {
-            // Note: One of the leaked connections is a client->server (irrelevant) but the other
-            // is server->client.
-            leak_two_established_socket_tls();
+        if counter == 21 {
+            println!("No more connections will be leaked to avoid crashing. Monitor the existing connections to see if they ever close.")
+        } else if counter < 21 {
+            // There are many ways to leak connections :)
+            if USE_ACTIX_SERVER {
+                // Note: One of the leaked connections is a client->server (irrelevant) but the other
+                // is server->client. However, due to a lack of TCP keep alive, it is arguably to be expected
+                // that the connections leak here.
+                leak_one_close_wait_socket_or_two_established_sockets_if_actix_server();
+            } else {
+                // Note: One of the leaked connections is a client->server (irrelevant) but the other
+                // is server->client.
+                leak_two_established_socket_tls();
+            }
         }
     });
 

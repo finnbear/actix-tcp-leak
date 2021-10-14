@@ -29,3 +29,5 @@ but doesn't attempt (or complete) an SSL handshake, the socket remains open inde
 ...
 thread '<unnamed>' panicked at 'called `Result::unwrap()` on an `Err` value: Os { code: 24, kind: Uncategorized, message: "Too many open files" }'
 ```
+Note: I added a limit to only attempt to leak connections 10 times. This is so the first 20 connections (half of which
+are server->client) can be monitored in the long term, without the program crashing.
