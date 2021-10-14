@@ -1,5 +1,3 @@
-#![feature(async_closure)]
-
 use actix_web::{web, App, HttpResponse, HttpServer};
 use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
 use rustls::internal::pemfile::{certs, pkcs8_private_keys};
@@ -24,7 +22,7 @@ async fn main() -> io::Result<()> {
     });
 
     let app = move || {
-        App::new().service(web::resource("/").route(web::get().to(async || {
+        App::new().service(web::resource("/").route(web::get().to(|| async {
             sleep(Duration::from_secs(2)).await;
             HttpResponse::Ok().body("Hello World!")
         })))
