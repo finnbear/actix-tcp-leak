@@ -9,12 +9,15 @@ use rustls::{NoClientAuth, ServerConfig};
 use std::collections::BTreeMap;
 use std::io::{BufReader, Write};
 use std::net::TcpStream;
+use std::os::unix::prelude::AsRawFd;
 use std::process::Command;
 use std::time::Duration;
 use std::{io, mem, thread};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::sleep;
 
+// If true, go directly to actix-server. However, as TCP keep alives are not implemented, the
+// connection leak is arguably to be expected in this case.
 const USE_ACTIX_SERVER: bool = false;
 
 #[actix_rt::main]
@@ -26,10 +29,14 @@ async fn main() -> io::Result<()> {
         thread::sleep(Duration::from_secs(1));
 
         // There are many ways to leak connections :)
-        leak_one_close_wait_socket_or_two_established_sockets_if_actix_server();
-        if !USE_ACTIX_SERVER {
-            // TLS based options.
-            leak_one_close_wait_socket_tls();
+        if USE_ACTIX_SERVER {
+            // Note: One of the leaked connections is a client->server (irrelevant) but the other
+            // is server->client. However, due to a lack of TCP keep alive, it is arguably to be expected
+            // that the connections leak here.
+            leak_one_close_wait_socket_or_two_established_sockets_if_actix_server();
+        } else {
+            // Note: One of the leaked connections is a client->server (irrelevant) but the other
+            // is server->client.
             leak_two_established_socket_tls();
         }
     });
@@ -96,44 +103,41 @@ async fn main() -> io::Result<()> {
     }
 }
 
-fn leak_one_close_wait_socket_or_two_established_sockets_if_actix_server() {
-    let mut stream = TcpStream::connect("127.0.0.1:1080").unwrap();
-
-    stream.write(&b"this is ok"[..]).unwrap();
-    stream.flush().unwrap();
-
-    mem::forget(stream);
+fn disable_keep_alives(stream: &TcpStream) {
+    let fd = stream.as_raw_fd();
+    unsafe {
+        let flag = 0;
+        libc::setsockopt(
+            fd,
+            libc::SOL_SOCKET,
+            libc::SO_KEEPALIVE,
+            mem::transmute(&flag as *const i32),
+            mem::size_of_val(&flag) as u32,
+        );
+    }
 }
 
-fn leak_one_close_wait_socket_tls() {
-    let stream = TcpStream::connect("127.0.0.1:1443").unwrap();
-
-    let mut builder = SslConnector::builder(SslMethod::tls()).unwrap();
-    builder.set_verify(SslVerifyMode::NONE);
-    let connector = builder.build();
-
-    let mut stream = connector.connect("localhost", stream).unwrap();
-    stream.ssl_write(&b"prepare to die, actix web"[..]).unwrap();
-    stream.flush().unwrap();
-
-    // Removing this avoids the leak, but the client cannot be trusted.
-    mem::forget(stream);
-}
-
-/// No idea why this leaks TWO sockets...
+/// Leaks one client->server socket (irrelevant) and one server->client socket.
 fn leak_two_established_socket_tls() {
     let stream = TcpStream::connect("127.0.0.1:1443").unwrap();
 
     // NOTE: SSL port but no SSL handshake.
 
+    disable_keep_alives(&stream);
+
     // Removing this avoids the leak, but the client cannot be trusted.
     mem::forget(stream);
 }
 
+/// Returns the count of each connection state on the process, including both client and server
+/// sockets.
 fn connection_counts() -> BTreeMap<String, usize> {
     let mut ret = BTreeMap::new();
 
-    let output = Command::new("netstat").arg("-natp").output().unwrap();
+    let output = Command::new("netstat")
+        .arg("-natp")
+        .output()
+        .expect("net-tools must be installed");
     for s in std::str::from_utf8(&output.stdout)
         .unwrap()
         .split('\n')
@@ -167,4 +171,37 @@ fn connection_counts() -> BTreeMap<String, usize> {
     }
 
     ret
+}
+
+// Any case in which only one connection leaks may be a case in which the server acts properly and the
+// client is the one that leaks. These cases may require further investigation.
+#[allow(dead_code)]
+fn leak_one_close_wait_socket_or_two_established_sockets_if_actix_server() {
+    let mut stream = TcpStream::connect("127.0.0.1:1080").unwrap();
+
+    stream.write(&b"this is ok"[..]).unwrap();
+    stream.flush().unwrap();
+
+    disable_keep_alives(&stream);
+
+    mem::forget(stream);
+}
+
+// See above comment.
+#[allow(dead_code)]
+fn leak_one_close_wait_socket_tls() {
+    let stream = TcpStream::connect("127.0.0.1:1443").unwrap();
+
+    disable_keep_alives(&stream);
+
+    let mut builder = SslConnector::builder(SslMethod::tls()).unwrap();
+    builder.set_verify(SslVerifyMode::NONE);
+    let connector = builder.build();
+
+    let mut stream = connector.connect("localhost", stream).unwrap();
+    stream.ssl_write(&b"prepare to die, actix web"[..]).unwrap();
+    stream.flush().unwrap();
+
+    // Removing this avoids the leak, but the client cannot be trusted.
+    mem::forget(stream);
 }

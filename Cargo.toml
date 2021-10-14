@@ -13,3 +13,4 @@ tokio = "1"
 rustls = "0.19.1"
 openssl = {version = "0.10.36", features=["vendored"]}
 futures-util = "0.3.17"
+libc = "0.2.103"
