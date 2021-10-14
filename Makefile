@@ -9,4 +9,4 @@ ssh:
     ssh root@$(DEBIAN_11)
 
 wrk:
-    wrk -t32 -c300 --timeout 30s -d1h https://$(DEBIAN_11)
+    wrk -t32 -c300 --timeout 30s -d1h https://$(DEBIAN_11):4443
