@@ -1,48 +1,89 @@
+#![allow(unused_imports)]
+
+use actix::{Actor, ActorContext, AsyncContext, Handler, Message, Recipient, StreamHandler};
 use actix_server::Server;
 use actix_service::{fn_service, ServiceFactoryExt as _};
 use actix_web::web::BytesMut;
-use actix_web::{web, App, HttpResponse, HttpServer};
+use actix_web::{web, App, HttpRequest, HttpResponse, HttpServer};
+use actix_web_actors::ws;
+use core::task::Poll::Ready;
 use futures_util::future::ok;
+use futures_util::task::noop_waker;
+use h2::client;
+use http::{Method, Request};
+use lazy_static::lazy_static;
 use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
 use rustls::internal::pemfile::{certs, pkcs8_private_keys};
 use rustls::{NoClientAuth, ServerConfig};
 use std::collections::BTreeMap;
+use std::collections::HashSet;
+use std::error::Error;
+use std::future::Future;
 use std::io::{BufReader, Write};
 use std::net::TcpStream;
 use std::os::unix::prelude::AsRawFd;
+use std::pin::Pin;
 use std::process::Command;
-use std::time::Duration;
+use std::sync::{Arc, Mutex};
+use std::task::{Context, Poll};
+use std::time::{Duration, Instant};
 use std::{io, mem, thread};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::time::sleep;
+use websocket::ClientBuilder;
 
 // If true, go directly to actix-server. However, as TCP keep alives are not implemented, the
 // connection leak is arguably to be expected in this case.
 const USE_ACTIX_SERVER: bool = false;
 
+lazy_static! {
+    static ref FIREHOSES: Arc<Mutex<HashSet<Recipient<Water>>>> =
+        Arc::new(Mutex::new(HashSet::new()));
+}
+
 #[actix_rt::main]
 async fn main() -> io::Result<()> {
     let mut counter = 0;
-    thread::spawn(move || loop {
-        println!("{}, {:?}", counter, connection_counts());
-        counter += 1;
+    thread::spawn(move || {
+        let rt = tokio::runtime::Runtime::new().unwrap();
 
-        thread::sleep(Duration::from_secs(1));
+        rt.block_on(async {
+            loop {
+                println!("{}, {:?}", counter, connection_counts());
+                counter += 1;
 
-        if counter == 21 {
-            println!("No more connections will be leaked to avoid crashing. Monitor the existing connections to see if they ever close.")
-        } else if counter < 21 {
-            // There are many ways to leak connections :)
-            if USE_ACTIX_SERVER {
-                // Note: One of the leaked connections is a client->server (irrelevant) but the other
-                // is server->client. However, due to a lack of TCP keep alive, it is arguably to be expected
-                // that the connections leak here.
-                leak_one_close_wait_socket_or_two_established_sockets_if_actix_server();
-            } else {
-                // Note: One of the leaked connections is a client->server (irrelevant) but the other
-                // is server->client.
-                leak_two_established_socket_tls();
+                thread::sleep(Duration::from_millis(100));
+
+                if counter == 21 {
+                    println!("No more connections will be leaked to avoid crashing. Monitor the existing connections to see if they ever close.")
+                } else if counter < 21 {
+                    // There are many ways to leak connections :)
+                    if USE_ACTIX_SERVER {
+                        // Note: One of the leaked connections is a client->server (irrelevant) but the other
+                        // is server->client. However, due to a lack of TCP keep alive, it is arguably to be expected
+                        // that the connections leak here.
+                        leak_one_close_wait_socket_or_two_established_sockets_if_actix_server();
+                    } else {
+                        // Note: One of the leaked connections is a client->server (irrelevant) but the other
+                        // is server->client.
+                        //leak_two_established_socket_tls();
+
+                        leak_two_established_websocket();
+
+                        /*
+                        leak_two_established_socket_http2_handshake();
+                        leak_two_established_socket_http2_keepalive();
+                         */
+                    }
+                }
             }
+        });
+    });
+
+    thread::spawn(|| loop {
+        thread::sleep(Duration::from_millis(10));
+        for firehose in FIREHOSES.lock().unwrap().iter() {
+            let _ = firehose.do_send(Water);
         }
     });
 
@@ -87,10 +128,12 @@ async fn main() -> io::Result<()> {
             .await
     } else {
         let app = move || {
-            App::new().service(web::resource("/").route(web::get().to(|| async {
-                sleep(Duration::from_secs(5)).await;
-                HttpResponse::Ok().body("Hello World!")
-            })))
+            App::new()
+                .service(web::resource("/").route(web::get().to(|| async {
+                    sleep(Duration::from_secs(5)).await;
+                    HttpResponse::Ok().body("Hello World!")
+                })))
+                .service(web::resource("/firehose").route(web::get().to(index)))
         };
 
         let mut config = ServerConfig::new(NoClientAuth::new());
@@ -108,7 +151,86 @@ async fn main() -> io::Result<()> {
     }
 }
 
-fn disable_keep_alives(stream: &TcpStream) {
+struct Firehose {
+    last_activity: Instant,
+}
+
+impl Actor for Firehose {
+    type Context = ws::WebsocketContext<Self>;
+
+    fn started(&mut self, ctx: &mut Self::Context) {
+        ctx.run_interval(Duration::from_secs(3), |act, ctx| {
+            if act.last_activity.elapsed() > Duration::from_secs(10) {
+                ctx.close(None);
+                ctx.stop();
+                println!("Stopping WS...");
+            } else {
+                ctx.ping(b"");
+                println!("Pinging WS...");
+            }
+        });
+
+        FIREHOSES.lock().unwrap().insert(ctx.address().recipient());
+    }
+
+    fn stopped(&mut self, ctx: &mut Self::Context) {
+        FIREHOSES.lock().unwrap().remove(&ctx.address().recipient());
+    }
+}
+
+impl StreamHandler<Result<ws::Message, ws::ProtocolError>> for Firehose {
+    fn handle(&mut self, _msg: Result<ws::Message, ws::ProtocolError>, _ctx: &mut Self::Context) {
+        self.last_activity = Instant::now();
+        // can just ignore incoming messages
+    }
+}
+
+#[derive(Message)]
+#[rtype(result = "()")]
+struct Water;
+
+impl Handler<Water> for Firehose {
+    type Result = ();
+
+    fn handle(&mut self, _: Water, ctx: &mut Self::Context) -> Self::Result {
+        // Enough to fill the network interface on my computer.
+        for _ in 0..10 {
+            ctx.text("BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES \
+        BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES\
+        BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES\
+        BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES\
+        BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES\
+        BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES\
+        BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES\
+        BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES\
+        BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES\
+        BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES\
+        BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES");
+        }
+    }
+}
+
+async fn index(req: HttpRequest, stream: web::Payload) -> Result<HttpResponse, actix_web::Error> {
+    ws::start(
+        Firehose {
+            last_activity: Instant::now(),
+        },
+        &req,
+        stream,
+    )
+}
+
+fn leak_two_established_websocket() {
+    let client = ClientBuilder::new("http://localhost:1080/firehose")
+        .unwrap()
+        .add_protocol("rust-websocket")
+        .connect_insecure()
+        .unwrap();
+
+    mem::forget(client);
+}
+
+fn disable_keep_alives<S: AsRawFd>(stream: &S) {
     let fd = stream.as_raw_fd();
     unsafe {
         let flag = 0;
@@ -122,7 +244,15 @@ fn disable_keep_alives(stream: &TcpStream) {
     }
 }
 
+#[allow(dead_code)]
+fn poll_once<F: Future>(future: Pin<&mut F>) -> Poll<F::Output> {
+    let waker = noop_waker();
+    let mut context = Context::from_waker(&waker);
+    Future::poll(future, &mut context)
+}
+
 /// Leaks one client->server socket (irrelevant) and one server->client socket.
+#[allow(dead_code)]
 fn leak_two_established_socket_tls() {
     let stream = TcpStream::connect("127.0.0.1:1443").unwrap();
 
@@ -133,6 +263,111 @@ fn leak_two_established_socket_tls() {
     // Removing this avoids the leak, but the client cannot be trusted.
     mem::forget(stream);
 }
+
+/*
+fn leak_two_established_socket_http2_handshake() {
+    tokio::spawn(async {
+        match tokio::net::TcpStream::connect("127.0.0.1:1080").await {
+            Ok(tcp) => {
+                disable_keep_alives(&tcp);
+
+                let mut fut = Box::pin(client::handshake(tcp));
+                if let Ready(_) = poll_once(Pin::as_mut(&mut fut)) {
+                    //panic!("handshake actually completed");
+                }
+
+                //drop(tcp);
+                mem::forget(fut);
+            }
+            Err(e) => println!("{:?}", e)
+        }
+    });
+}
+
+pub fn normal_http2() {
+    tokio::spawn(async {
+        let _ = async {
+            // Establish TCP connection to the server.
+            let tcp = tokio::net::TcpStream::connect("127.0.0.1:1080").await?;
+            let (h2, connection) = client::handshake(tcp).await?;
+            tokio::spawn(async move {
+                connection.await.unwrap();
+            });
+
+            let mut h2 = h2.ready().await?;
+            // Prepare the HTTP request to send to the server.
+            let request = Request::builder()
+                .method(Method::GET)
+                .uri("https://www.example.com/")
+                .body(())
+                .unwrap();
+
+            // Send the request. The second tuple item allows the caller
+            // to stream a request body.
+            let (response, _) = h2.send_request(request, true).unwrap();
+
+            let (head, mut body) = response.await?.into_parts();
+
+            println!("Received response: {:?}", head);
+
+            // The `flow_control` handle allows the caller to manage
+            // flow control.
+            //
+            // Whenever data is received, the caller is responsible for
+            // releasing capacity back to the server once it has freed
+            // the data from memory.
+            let mut flow_control = body.flow_control().clone();
+
+            while let Some(chunk) = body.data().await {
+                let chunk = chunk?;
+                println!("RX: {:?}", chunk);
+
+                // Let the server send more data.
+                let _ = flow_control.release_capacity(chunk.len());
+            }
+
+            Result::<(), Box<dyn Error>>::Ok(())
+        }.await;
+    });
+}
+
+fn leak_two_established_socket_http2_keepalive() {
+    tokio::spawn(async {
+        match tokio::net::TcpStream::connect("127.0.0.1:1080").await {
+            Ok(tcp) => {
+                //disable_keep_alives(&tcp);
+                match client::handshake(tcp).await {
+                    Ok((h2, mut connection)) => {
+                        let request = Request::builder()
+                            .method(Method::GET)
+                            .uri("http://127.0.0.1/")
+                            .body(())
+                            .unwrap();
+
+                        let mut h2 = h2.ready().await.unwrap();
+
+                        let (response, _) = h2.send_request(request, true).unwrap();
+
+                        let _ = response.await;
+
+                        mem::forget(connection.ping_pong());
+                        let mut fut = Box::pin(connection);
+                        for _ in 0..500 {
+                            if let Ready(_) = poll_once(Pin::as_mut(&mut fut)) {
+                                panic!("connection actually completed");
+                            }
+                        }
+
+                        mem::forget(fut);
+                    }
+                    Err(e) => println!("{:?}", e)
+                }
+            }
+            Err(e) => println!("{:?}", e)
+        }
+    });
+}
+ */
 
 /// Returns the count of each connection state on the process, including both client and server
 /// sockets.
