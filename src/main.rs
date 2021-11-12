@@ -81,9 +81,18 @@ async fn main() -> io::Result<()> {
     });
 
     thread::spawn(|| loop {
-        thread::sleep(Duration::from_millis(10));
+        thread::sleep(Duration::from_millis(100));
+        let mut err_count = 0;
+        let mut total = 0;
         for firehose in FIREHOSES.lock().unwrap().iter() {
-            let _ = firehose.do_send(Water);
+            if firehose.do_send(Water).is_err() {
+              err_count += 1;
+            }
+            total += 1;
+        }
+
+        if err_count > 0 {
+            println!("{} out of {} do_send(Water) failed.", err_count, total);
         }
     });
 
@@ -194,7 +203,7 @@ impl Handler<Water> for Firehose {
 
     fn handle(&mut self, _: Water, ctx: &mut Self::Context) -> Self::Result {
         // Enough to fill the network interface on my computer.
-        for _ in 0..10 {
+        for _ in 0..1000 {
             ctx.text("BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES \
         BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES\
         BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES BYTES\
