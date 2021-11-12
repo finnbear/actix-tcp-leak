@@ -86,7 +86,7 @@ async fn main() -> io::Result<()> {
         let mut total = 0;
         for firehose in FIREHOSES.lock().unwrap().iter() {
             if firehose.do_send(Water).is_err() {
-              err_count += 1;
+                err_count += 1;
             }
             total += 1;
         }
