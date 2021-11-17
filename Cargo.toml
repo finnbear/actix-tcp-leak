@@ -6,13 +6,15 @@ edition = "2018"
 [dependencies]
 actix = "0.12.0"
 actix-rt = "2.3.0"
-actix-http= "3.0.0-beta.10"
+actix-http= "3.0.0-beta.11"
 actix-web = {version="4.0.0-beta.9", features=["rustls"]}
 actix-web-actors = "4.0.0-beta.7"
 actix-server = "2.0.0-beta.6"
 actix-service = "2.0.1"
 tokio = {version = "1", features=["rt-multi-thread"]}
-rustls = "0.19.1"
+rustls = "0.20"
+x509-parser = "0.11.0"
+rustls-pemfile = "0.2.1"
 openssl = {version = "0.10.36", features=["vendored"]}
 futures-util = "0.3.17"
 libc = "0.2.103"

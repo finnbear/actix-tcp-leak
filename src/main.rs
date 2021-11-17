@@ -13,8 +13,9 @@ use h2::client;
 use http::{Method, Request};
 use lazy_static::lazy_static;
 use openssl::ssl::{SslConnector, SslMethod, SslVerifyMode};
-use rustls::internal::pemfile::{certs, pkcs8_private_keys};
-use rustls::{NoClientAuth, ServerConfig};
+use x509_parser::pem::parse_x509_pem;
+use rustls_pemfile;
+use rustls::server::{NoClientAuth, ServerConfig};
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::error::Error;
@@ -145,11 +146,27 @@ async fn main() -> io::Result<()> {
                 .service(web::resource("/firehose").route(web::get().to(index)))
         };
 
-        let mut config = ServerConfig::new(NoClientAuth::new());
-        let cert_chain = certs(&mut BufReader::new(&include_bytes!("example.crt")[..])).unwrap();
-        let mut keys =
-            pkcs8_private_keys(&mut BufReader::new(&include_bytes!("example.key")[..])).unwrap();
-        config.set_single_cert(cert_chain, keys.remove(0)).unwrap();
+        let mut cert_reader = &mut BufReader::new(&include_bytes!("example.crt")[..]);
+        let mut priv_reader = &mut BufReader::new(&include_bytes!("example.key")[..]);
+
+        let config = ServerConfig::builder()
+            .with_safe_defaults()
+            .with_client_cert_verifier(NoClientAuth::new())
+            .with_single_cert(
+                rustls_pemfile::certs(&mut cert_reader)
+                    .unwrap()
+                    .into_iter()
+                    .map(|v| rustls::Certificate(v))
+                    .collect(),
+                rustls::PrivateKey(
+                    rustls_pemfile::pkcs8_private_keys(&mut priv_reader)
+                        .unwrap()
+                        .into_iter()
+                        .next()
+                        .unwrap(),
+                ),
+            )
+            .unwrap();
 
         HttpServer::new(app)
             .keep_alive(1)
@@ -179,11 +196,15 @@ impl Actor for Firehose {
             }
         });
 
+        println!("A firehose is starting");
         FIREHOSES.lock().unwrap().insert(ctx.address().recipient());
+        println!("A firehose started");
     }
 
     fn stopped(&mut self, ctx: &mut Self::Context) {
+        println!("A firehose is stopping");
         FIREHOSES.lock().unwrap().remove(&ctx.address().recipient());
+        println!("A firehose stopped");
     }
 }
 
