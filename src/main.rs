@@ -43,24 +43,17 @@ async fn main() -> io::Result<()> {
 
     thread::spawn(|| loop {
         thread::sleep(Duration::from_millis(100));
-        let mut err_count = 0;
-        let mut total = 0;
+        //println!("Starting broadcast.");
         for firehose in FIREHOSES.lock().unwrap().iter() {
-            if firehose.do_send(Water).is_err() {
-                err_count += 1;
-            }
-            total += 1;
+            firehose.do_send(Water)
         }
-
-        if err_count > 0 {
-            println!("{} out of {} do_send(Water) failed.", err_count, total);
-        }
+        //println!("Done with broadcast.");
     });
 
     let app = move || App::new().service(web::resource("/firehose").route(web::get().to(index)));
 
     HttpServer::new(app)
-        .keep_alive(1)
+        .keep_alive(Duration::from_secs(1))
         .bind("0.0.0.0:1080")?
         .run()
         .await
